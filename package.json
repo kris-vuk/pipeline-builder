@@ -15,7 +15,7 @@
     "check": "tsc -p tsconfig.example.json --noEmit",
     "test": "npm run build && npm run check && node --test test/*.test.cjs",
     "synth": "cdk synth",
-    "prepack": "npm run build"
+    "prepare": "npm run build"
   },
   "engines": { "node": ">=22" },
   "peerDependencies": {

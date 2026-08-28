@@ -28,7 +28,18 @@ npm install --save-dev aws-cdk typescript ts-node @types/node
 ```
 
 Run `npm run build` in `pipeline-builder` before consuming a local directory link.
-Packaged installs compile via `prepack` and include JavaScript and declarations.
+Git installs and `npm pack` compile via `prepare` and include JavaScript and declarations.
+Install directly from this private repository using a pinned commit:
+
+```sh
+npm install 'git+https://github.com/kris-vuk/pipeline-builder.git#<commit-sha>' aws-cdk-lib constructs
+```
+
+Git authentication must have read access to the repository. Do not put tokens in
+the URL or disable lifecycle scripts: `prepare` builds `lib` from the Git source.
+For HTTPS-only credentials, configure Git's `url.https://github.com/.insteadOf`
+for `ssh://git@github.com/` and `git@github.com:` too; npm can normalize the
+lockfile's GitHub URL to SSH. Foundry credentialed install steps do this automatically.
 
 ```ts
 import { App } from 'aws-cdk-lib';
