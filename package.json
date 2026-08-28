@@ -1,0 +1,33 @@
+{
+  "name": "@foundry/pipeline-builder",
+  "version": "0.1.0",
+  "description": "TypeScript pipeline constructs that synthesize with AWS CDK",
+  "license": "UNLICENSED",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": { "types": "./lib/index.d.ts", "default": "./lib/index.js" },
+    "./schema": { "types": "./lib/schema.d.ts", "default": "./lib/schema.js" }
+  },
+  "files": ["lib", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.example.json --noEmit",
+    "test": "npm run build && npm run check && node --test test/*.test.cjs",
+    "synth": "cdk synth",
+    "prepack": "npm run build"
+  },
+  "engines": { "node": ">=22" },
+  "peerDependencies": {
+    "aws-cdk-lib": "^2.267.0",
+    "constructs": "^10.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "aws-cdk": "^2.1139.0",
+    "aws-cdk-lib": "2.267.0",
+    "constructs": "^10.4.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  }
+}
