@@ -1,89 +1,89 @@
-/** Stateless wire contract. This entry point deliberately has no CDK imports. */
-export const PipelineExecutionMode = { Sequential: 'sequential' } as const;
-export type PipelineExecutionMode = typeof PipelineExecutionMode[keyof typeof PipelineExecutionMode];
-export const StageType = { Build: 'build', DefinitionSync: 'definition-sync', Deployment: 'deployment' } as const;
-export type StageType = typeof StageType[keyof typeof StageType];
-export const TargetExecutionMode = { Parallel: 'parallel' } as const;
-export type TargetExecutionMode = typeof TargetExecutionMode[keyof typeof TargetExecutionMode];
-export const DeploymentEngine = { Cdk: 'CDK' } as const;
-export type DeploymentEngine = typeof DeploymentEngine[keyof typeof DeploymentEngine];
-export const ApprovalStepType = { IntegrationTests: 'integration-tests', BakeTime: 'bake-time' } as const;
-export type ApprovalStepType = typeof ApprovalStepType[keyof typeof ApprovalStepType];
-export const ApprovalFailureAction = { Block: 'block', Rollback: 'rollback' } as const;
-export type ApprovalFailureAction = typeof ApprovalFailureAction[keyof typeof ApprovalFailureAction];
+/** Foundry's pipeline definition, version 1. This entry point deliberately has no CDK imports. */
+export const SCHEMA_VERSION = 1;
 
-export interface BuildSource {
-  readonly path: string;
+/** The build step is fixed: clone every tracked package, then run this in each one. */
+export const BUILD_COMMAND = 'make build';
+
+export const StepType = {
+  CdkDeployment: 'cdk-deployment',
+  Integration: 'integration',
+  BakeTime: 'bake-time',
+  ManualApproval: 'manual-approval',
+} as const;
+export type StepType = typeof StepType[keyof typeof StepType];
+
+export const Region = { UsEast1: 'us-east-1', UsWest2: 'us-west-2', EuWest1: 'eu-west-1' } as const;
+export type Region = typeof Region[keyof typeof Region];
+
+export const REGIONS: readonly Region[] = Object.values(Region);
+
+/** A repository the pipeline tracks: cloned, built, and watched for new commits. */
+export interface TrackedPackageDefinition {
+  readonly repository: string;
   readonly branch: string;
-  readonly tracking: boolean;
 }
 
-export interface IntegrationTestsApprovalDefinition {
-  readonly id: string;
-  readonly type: typeof ApprovalStepType.IntegrationTests;
-  /** The test stack to deploy for this approval. Completion signaling is not yet specified. */
-  readonly deployment: Omit<DeploymentTargetDefinition, 'id' | 'name'>;
-  /** Omitted means all deployment targets in this stage. */
-  readonly targetIds?: readonly string[];
-  readonly onFailure: readonly ApprovalFailureAction[];
-}
-
-export interface BakeTimeApprovalDefinition {
-  readonly id: string;
-  readonly type: typeof ApprovalStepType.BakeTime;
-  readonly durationSeconds: number;
-}
-
-export type ApprovalStepDefinition = IntegrationTestsApprovalDefinition | BakeTimeApprovalDefinition;
-
-export interface CDKDeploymentDefinition {
-  readonly engine: typeof DeploymentEngine.Cdk;
+/** Both CDK step types name one stack inside a tracked package's `cdk.out`. */
+export interface CdkStackStepFields {
+  /** The repository of the tracked package holding the stack; matched against `build.trackedPackages`. */
   readonly source: string;
-  readonly resources: readonly string[];
-  readonly cloudAssembly: {
-    /** Relative to the pipeline JSON file; stack IDs resolve in this manifest. */
-    readonly directory: string;
-    readonly stackArtifactIds: readonly string[];
-  };
-}
-
-export interface DeploymentTargetDefinition {
-  readonly id: string;
-  readonly name: string;
-  readonly region: string;
+  /** Path to the cloud assembly within that repository, used as `cdk deploy --app`. */
+  readonly cdkOutPath: string;
+  /** What `cdk deploy` selects on: the stack's artifact ID, not its physical name. */
+  readonly stackName: string;
   readonly awsAccountId: string;
-  readonly deployments: readonly CDKDeploymentDefinition[];
+  readonly region: Region;
 }
 
-export interface StageDefinitionBase {
-  readonly id: string;
+export interface CdkDeploymentStepDefinition extends CdkStackStepFields {
+  readonly type: typeof StepType.CdkDeployment;
+}
+
+/** Deploys a test stack, then invokes the function it publishes as `IntegTestFunctionName`. */
+export interface IntegrationStepDefinition extends CdkStackStepFields {
+  readonly type: typeof StepType.Integration;
+}
+
+export interface BakeTimeStepDefinition {
+  readonly type: typeof StepType.BakeTime;
+  readonly durationMinutes: number;
+}
+
+export interface ManualApprovalStepDefinition {
+  readonly type: typeof StepType.ManualApproval;
+  readonly instructions: string;
+}
+
+export type StepDefinition =
+  | CdkDeploymentStepDefinition
+  | IntegrationStepDefinition
+  | BakeTimeStepDefinition
+  | ManualApprovalStepDefinition;
+
+/** Steps run in order; the stage promotes once the last one succeeds. */
+export interface StageDefinition {
   readonly name: string;
-  /** Configures the outgoing transition; omitted on the final stage. */
-  readonly promotion?: { readonly enabled: boolean };
+  readonly steps: readonly StepDefinition[];
 }
 
-export interface BuildStageDefinition extends StageDefinitionBase {
-  readonly type: typeof StageType.Build;
-  readonly sources: readonly BuildSource[];
+export interface BuildDefinition {
+  readonly command: typeof BUILD_COMMAND;
+  readonly trackedPackages: readonly TrackedPackageDefinition[];
 }
-
-export interface DefinitionSyncStageDefinition extends StageDefinitionBase {
-  readonly type: typeof StageType.DefinitionSync;
-}
-
-export interface DeploymentStageDefinition extends StageDefinitionBase {
-  readonly type: typeof StageType.Deployment;
-  readonly description?: string;
-  readonly targetExecutionMode: typeof TargetExecutionMode.Parallel;
-  readonly targets: readonly DeploymentTargetDefinition[];
-  readonly approvalSteps: readonly ApprovalStepDefinition[];
-}
-
-export type StageDefinition = BuildStageDefinition | DefinitionSyncStageDefinition | DeploymentStageDefinition;
 
 export interface PipelineDefinition {
-  readonly schemaVersion: 2;
-  readonly name: string;
-  readonly executionMode: PipelineExecutionMode;
+  readonly schemaVersion: typeof SCHEMA_VERSION;
+  readonly build: BuildDefinition;
   readonly stages: readonly StageDefinition[];
 }
+
+/** The `POST /pipelines` body, which is what the synthesized `pipeline.json` holds. */
+export interface CreatePipelineRequest {
+  readonly pipelineName: string;
+  readonly definition: PipelineDefinition;
+}
+
+export const isCdkStackStep = (
+  step: StepDefinition,
+): step is CdkDeploymentStepDefinition | IntegrationStepDefinition =>
+  step.type === StepType.CdkDeployment || step.type === StepType.Integration;

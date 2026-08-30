@@ -1,9 +1,9 @@
 # @foundry/pipeline-builder
 
-Author Foundry pipelines as TypeScript classes and methods. A normal `cdk synth`
-writes the pipeline JSON, CloudFormation templates, asset manifests, and staged
-assets beneath `cdk.out`. This package generates configuration; it does not deploy
-resources or execute pipelines.
+Author Foundry pipelines as TypeScript, in the same CDK app as the stacks they
+deploy. A normal `cdk synth` writes `cdk.out/pipeline.json` — the exact body
+Foundry's `POST /pipelines` takes — beside the templates the pipeline names. This
+package generates configuration; it does not deploy resources or run pipelines.
 
 ## Try it
 
@@ -13,23 +13,13 @@ npm test
 npx cdk synth
 ```
 
-The included example uses an ordinary CDK `App`, one Alpha stage, an `ExampleStack`
-containing one S3 bucket, an empty `IntegrationTestsStack` approval, and a bake period. It needs no AWS
-credentials to synthesize because its environments are explicit and it performs
-no lookups.
+The included example is an ordinary CDK `App` with two stacks and one `Alpha`
+stage that deploys the first, integration-tests the second, and bakes for thirty
+minutes. It needs no AWS credentials to synthesize.
 
 ## Use the package
 
-Install the package and its peers in your CDK app. For local development:
-
-```sh
-npm install ../pipeline-builder aws-cdk-lib constructs
-npm install --save-dev aws-cdk typescript ts-node @types/node
-```
-
-Run `npm run build` in `pipeline-builder` before consuming a local directory link.
-Git installs and `npm pack` compile via `prepare` and include JavaScript and declarations.
-Install directly from this private repository using a pinned commit:
+Install the package and its peers in your CDK app:
 
 ```sh
 npm install 'git+https://github.com/kris-vuk/pipeline-builder.git#<commit-sha>' aws-cdk-lib constructs
@@ -39,147 +29,113 @@ Git authentication must have read access to the repository. Do not put tokens in
 the URL or disable lifecycle scripts: `prepare` builds `lib` from the Git source.
 For HTTPS-only credentials, configure Git's `url.https://github.com/.insteadOf`
 for `ssh://git@github.com/` and `git@github.com:` too; npm can normalize the
-lockfile's GitHub URL to SSH. Foundry credentialed install steps do this automatically.
+lockfile's GitHub URL to SSH. For local development, `npm install ../pipeline-builder`
+after running `npm run build` here.
 
 ```ts
 import { App } from 'aws-cdk-lib';
-import {
-  Pipeline,
-  CDKDeploymentTarget,
-  IntegrationTestsApprovalStep,
-  BakeTimeApprovalStep,
-} from '@foundry/pipeline-builder';
-import { ExampleStack } from './example-stack'; // See examples/example-stack.ts.
-import { IntegrationTestsStack } from './integration-tests-stack';
+import { CdkDeploymentStep, IntegrationTestsStep, Pipeline } from '@foundry/pipeline-builder';
+import { MessageGatewayStack } from '../lib/message-gateway-stack';
+import { MessageGatewayIntegTestsStack } from '../lib/message-gateway-integ-tests-stack';
+
+const env = { account: '486554617966', region: 'us-east-1' };
 
 const app = new App();
+const service = new MessageGatewayStack(app, 'MessageGatewayStack', { env });
+const tests = new MessageGatewayIntegTestsStack(app, 'MessageGatewayIntegTestsStack', { env });
+
 const pipeline = new Pipeline(app, 'Delivery', {
-  pipelineName: 'messaging-gateway',
-  env: { account: '111111111111', region: 'us-east-1' },
+  pipelineName: 'message-gateway',
+  trackedPackages: [{ repository: 'https://github.com/kris-vuk/test-repo', branch: 'main' }],
+  cdkOutPath: 'message-gateway/iac/cdk.out',
 });
 
-const alpha = pipeline.addStage('alpha', { name: 'Alpha' });
-alpha.addDeploymentTarget(new CDKDeploymentTarget(new ExampleStack(alpha, 'Service')));
-alpha.addApprovalStep(new IntegrationTestsApprovalStep(new IntegrationTestsStack(alpha, 'integration-tests')));
-alpha.addApprovalStep(new BakeTimeApprovalStep('bake', { durationSeconds: 1800 }));
-
-// The CDK CLI triggers App auto-synthesis. For programmatic use: app.synth().
+const sandbox = pipeline.addStage('sandbox');
+sandbox.addStep(new CdkDeploymentStep(service));
+sandbox.addStep(new IntegrationTestsStep(tests));
 ```
 
-`IntegrationTestsStack` is deliberately empty for now. Its stack reference is
-included in the approval definition, and its template is synthesized alongside
-the S3 stack. Test resources will eventually signal completion to the pipeline;
-this example does not implement signaling or claim a passing test result. The
-empty stack is a synthesis placeholder, not a runnable test suite. CDK may add
-its own metadata resource or warn that the template has no resources.
+Set your app command in `cdk.json`, for example
+`{ "app": "npx ts-node bin/app.ts" }`, then `cdk synth`. Create the pipeline with
+the file it writes:
 
-Set your app command in `cdk.json`, for example:
+```sh
+curl -X POST "$FOUNDRY_API/pipelines" -H 'content-type: application/json' -d @cdk.out/pipeline.json
+```
+
+## What it emits
+
+Schema version 1, the contract `pipeline-orchestrator` validates and the website
+edits:
 
 ```json
-{ "app": "npx ts-node bin/app.ts" }
+{
+  "pipelineName": "message-gateway",
+  "definition": {
+    "schemaVersion": 1,
+    "build": {
+      "command": "make build",
+      "trackedPackages": [{ "repository": "https://github.com/kris-vuk/test-repo", "branch": "main" }]
+    },
+    "stages": [
+      {
+        "name": "sandbox",
+        "steps": [
+          {
+            "type": "cdk-deployment",
+            "source": "https://github.com/kris-vuk/test-repo",
+            "cdkOutPath": "message-gateway/iac/cdk.out",
+            "stackName": "MessageGatewayStack",
+            "awsAccountId": "486554617966",
+            "region": "us-east-1"
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
-## Output and CDK integration
+The build step is implicit and fixed: Foundry clones every tracked package and
+runs `make build` in each one. Each stage is an ordered list of steps:
 
-`Pipeline` extends CDK `Stage` and overrides its public `synth()` method. The
-parent `App` discovers and synthesizes this nested assembly automatically. No
-custom app class, patched internals, policy-validation side effects, extra
-CloudFormation pipeline stack, or separate export command is required.
-
-For a pipeline with construct ID `Delivery`, output typically looks like:
-
-```text
-cdk.out/
-  manifest.json
-  tree.json
-  asset.<hash>/
-  assembly-Delivery/
-    manifest.json
-    pipeline.json
-    <stack-artifact-id>.template.json
-    <stack-artifact-id>.assets.json
-```
-
-`pipeline.pipelineFile` gives the exact absolute JSON path. CDK derives assembly
-and stack filenames from construct paths; consumers should follow manifests,
-not guess names. Each pipeline gets its own assembly and `pipeline.json`, so
-multiple pipelines in one app do not overwrite one another. `cdk synth --output
-other-directory` moves the whole output tree together.
-
-Each deployment's `cloudAssembly.directory` is relative to `pipeline.json`.
-`cloudAssembly.stackArtifactIds` selects entries in that directory's
-`manifest.json`; `resources` contains their CloudFormation stack names. CDK keeps
-templates, asset publishing instructions, dependencies, and bootstrap metadata.
-Transport the **entire root `cdk.out` directory**: asset paths can point from a
-nested assembly to a shared asset at the root.
-
-Scope target stacks beneath the `Pipeline`, commonly beneath a stage returned by
-`addStage`. Nested CDK `Stage` assemblies under the pipeline are supported. Stacks
-elsewhere in the app or in another app are rejected because they would not be
-included when the pipeline is synthesized. `NestedStack` is not an independently
-deployable target; wrap its parent `Stack`. Custom stack synthesizers remain
-untouched and are responsible for their own CDK artifact/asset behavior.
+| Step | Class | What Foundry does |
+| --- | --- | --- |
+| `cdk-deployment` | `CdkDeploymentStep(stack, props?)` | `cdk deploy <stackName> --app <source>/<cdkOutPath>` |
+| `integration` | `IntegrationTestsStep(stack, props?)` | Deploys the stack, then invokes the function it publishes as `IntegTestFunctionName` and fails on a red report |
+| `bake-time` | `BakeTimeStep({ durationMinutes })` | Holds the stage before promotion |
+| `manual-approval` | `ManualApprovalStep({ instructions })` | Waits for a human |
 
 ## Builder behavior
 
-- `addStage(id, props)` returns a deployment stage and appends it in order.
-- `addBuildStage(...).addSource(...)` defaults branch to `main` and tracking to
-  `true`. `addDefinitionSyncStage(...)` explicitly models definition installation.
-- `addDeploymentTarget(new CDKDeploymentTarget(stack, props))` returns the target.
-  Target IDs default to the stack construct ID; source defaults to `.`.
-  `target.addStack(stack)` groups additional stacks in the same account/Region.
-- `addApprovalStep(step)` returns the step. Approvals run in insertion order after
-  all parallel targets succeed. `new IntegrationTestsApprovalStep(stack)` wraps
-  a CDK test stack and derives its ID and environment from that stack. Its
-  `deployment` records relative cloud assembly references, just like deployment
-  targets. Integration tests default to all targets and
-  `[Block, Rollback]`; `targetIds` and `onFailure: [ApprovalFailureAction.Block]`
-  can narrow this. Bake duration is a positive integer number of seconds.
-- `promotionEnabled` defaults to `true`; `setPromotionEnabled(false)` disables
-  that stage's outgoing transition. The final stage omits `promotion`.
-- `pipeline.toDefinition()` returns a fresh snapshot without writing files.
-  `app.synth()` or `pipeline.synth()` emits JSON and the CDK assembly. Finish
-  configuration before synthesis; CDK caches assemblies. Use a new app to make
-  subsequent changes.
+- `new Pipeline(app, id, props)` takes `pipelineName` (default: the construct ID),
+  `trackedPackages`, a default `cdkOutPath` (default `cdk.out`), and a `fileName`
+  (default `pipeline.json`). `addTrackedPackage(...)` defaults `branch` to `main`.
+- `addStage(id, props?)` appends a stage; its `name` defaults to the construct ID.
+  `addStep(step)` appends a step, and steps run in the order they are added.
+- A CDK step reads its account and Region from the stack, and names the stack by
+  `stack.artifactId` — the ID `cdk deploy` selects on, not the physical stack name.
+  `source` defaults to the pipeline's only tracked package and `cdkOutPath` to the
+  pipeline's; both can be set per step, along with `stackName`.
+- `pipeline.toDefinition()` and `toCreateRequest()` return fresh snapshots without
+  writing anything. Synthesis writes `pipeline.json` into the app's `cdk.out`;
+  `pipeline.pipelineFile` is its absolute path, and `writeDefinition()` writes it
+  on demand.
 
-Every deployment target needs a concrete account and Region supplied by its
-stack or inherited from the pipeline/CDK stage. Unresolved environment tokens
-cannot be executed from pipeline JSON and are rejected. Ordinary CloudFormation
-tokens inside the stack template remain fully supported.
+Deployment stacks stay top-level in the app: the runner deploys them from the
+repository's own `cdk.out` with `--app`, which cannot select into a nested
+assembly. Stacks in a nested `Stage`, `NestedStack`s, unresolved environment
+tokens, regions outside `us-east-1` / `us-west-2` / `eu-west-1`, and steps whose
+`source` is not a tracked package are all rejected locally, before anything is
+written.
 
-## Schema and scope
-
-This package owns the evolving **schema version 2** contract, with an explicit
-`definition-sync` stage, stack-based integration-test approvals, and CDK assembly
-references. Integration-test stack references replace the earlier Lambda runner
-and ARN-output bindings described in `pipeline-service/SPEC.md`; the service's
-execution/signaling contract still needs to be updated. The website's existing
-version 1 fixtures are not changed or silently reinterpreted; migrating those
-fixtures and wiring consumers to this package is separate work.
-
-Use `@foundry/pipeline-builder/schema` for the wire types and fixed enum objects
-without loading CDK or Node APIs in frontend/service code. The root entry point
-also exports these contracts alongside the builder classes.
-
-The intended service graph is Build → DefinitionSync → Deployment stages.
-Local validation checks empty stages, duplicate IDs, target environments and
-scope, approval target references, and approval settings. It does not yet enforce
-the service's full graph semantics or implement completion signaling. No
-runtime statuses, commits, test results, or elapsed bake times enter this JSON.
-
-See the AWS documentation for the public
-[CDK Stage synthesis contract](https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.Stage.html)
-and [cloud assembly output](https://docs.aws.amazon.com/cdk/v2/guide/configure-synth.html).
+Use `@foundry/pipeline-builder/schema` for the wire types and enum objects without
+loading CDK or Node APIs in frontend or service code.
 
 ## Verification
 
-`npm test` type-checks the library and example, exercises the builder and invalid
-configurations, checks stack/asset references after relocating output, and runs
-the real CDK CLI against the TypeScript example with default and custom output
-directories. `npm run synth` leaves a local example assembly in `cdk.out`.
-
-CDK deployment itself remains a separate operation. Stacks in nested assemblies
-are selected through their assembly's manifest (for example, use that directory as
-the deployment command's `--app`); the pipeline JSON does not turn `cdk deploy`
-into a Foundry pipeline execution command.
-# pipeline-builder
+`npm test` type-checks the library and example, exercises the builder and its
+invalid configurations, and runs the real CDK CLI against the TypeScript example
+with default and custom output directories, checking that every stack a step names
+is selectable from the assembly it was written beside. `npm run synth` leaves an
+example assembly in `cdk.out`.

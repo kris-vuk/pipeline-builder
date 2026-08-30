@@ -1,21 +1,26 @@
 import { App } from 'aws-cdk-lib';
 import {
-  BakeTimeApprovalStep, CDKDeploymentTarget, IntegrationTestsApprovalStep, Pipeline,
+  BakeTimeStep, CdkDeploymentStep, IntegrationTestsStep, Pipeline,
 } from '../src';
 import { ExampleStack } from './example-stack';
 import { IntegrationTestsStack } from './integration-tests-stack';
 
 const app = new App();
-const pipeline = new Pipeline(app, 'MessagingPipeline', {
-  pipelineName: 'messaging-gateway-pipeline',
-  env: { account: '111111111111', region: 'us-east-1' },
+const env = { account: '111111111111', region: 'us-east-1' };
+
+// Ordinary top-level stacks: the runner deploys them out of this repository's own cdk.out.
+const service = new ExampleStack(app, 'ExampleStack', { env });
+const tests = new IntegrationTestsStack(app, 'IntegrationTestsStack', { env });
+
+const pipeline = new Pipeline(app, 'Delivery', {
+  pipelineName: 'messaging-gateway',
+  trackedPackages: [{ repository: 'https://github.com/kris-vuk/test-repo' }],
+  cdkOutPath: 'message-gateway/iac/cdk.out',
 });
 
-const alpha = pipeline.addStage('alpha', { name: 'Alpha' });
+const alpha = pipeline.addStage('Alpha');
+alpha.addStep(new CdkDeploymentStep(service));
+alpha.addStep(new IntegrationTestsStep(tests));
+alpha.addStep(new BakeTimeStep({ durationMinutes: 30 }));
 
-alpha.addDeploymentTarget(new CDKDeploymentTarget(new ExampleStack(alpha, 'iad')));
-
-alpha.addApprovalStep(new IntegrationTestsApprovalStep(new IntegrationTestsStack(alpha, 'integration-tests')));
-alpha.addApprovalStep(new BakeTimeApprovalStep('bake', { durationSeconds: 1800 }));
-
-// App auto-synthesis is enabled by the CDK CLI. No separate pipeline export call.
+// The CDK CLI triggers app synthesis, which writes cdk.out/pipeline.json.

@@ -1,81 +1,123 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Stage, type StageProps, type StageSynthesisOptions } from 'aws-cdk-lib';
-import type { CloudAssembly } from 'aws-cdk-lib/cx-api';
-import type { Construct } from 'constructs';
+import { App, Aspects, type IAspect } from 'aws-cdk-lib';
+import { Construct, type IConstruct } from 'constructs';
+import { PipelineStage, type PipelineStageProps } from './pipeline-stage';
 import {
-  BuildStage, DefinitionSyncStage, DeploymentStage, PipelineStage,
-  type DeploymentStageProps, type PipelineStageProps,
-} from './pipeline-stage';
-import { PipelineExecutionMode, type PipelineDefinition } from './schema';
+  BUILD_COMMAND, SCHEMA_VERSION,
+  type CreatePipelineRequest, type PipelineDefinition, type TrackedPackageDefinition,
+} from './schema';
+import type { StepContext } from './step';
 import { requireLiteral, requireUnique } from './validation';
 
-export interface PipelineProps extends StageProps {
-  /** @default construct ID */
-  readonly pipelineName?: string;
+/** Default file name; the whole `POST /pipelines` body, so it can be posted as-is. */
+export const PIPELINE_FILE_NAME = 'pipeline.json';
+
+/** The cloud assembly the runner deploys from, relative to the repository root. */
+export const DEFAULT_CDK_OUT_PATH = 'cdk.out';
+
+export interface TrackedPackageProps {
+  readonly repository: string;
+  /** @default 'main' */
+  readonly branch?: string;
 }
 
-/** A CDK assembly containing a Foundry pipeline definition and its deployment stacks. */
-export class Pipeline extends Stage {
+export interface PipelineProps {
+  /** @default the construct ID */
+  readonly pipelineName?: string;
+  /** Cloned and `make build`-ed on every change; at least one is required. */
+  readonly trackedPackages?: readonly TrackedPackageProps[];
+  /** Where each tracked package leaves its cloud assembly. @default 'cdk.out' */
+  readonly cdkOutPath?: string;
+  /** Written into the app's `cdk.out`. @default 'pipeline.json' */
+  readonly fileName?: string;
+}
+
+/** Writes the pipeline JSON once the app it belongs to is synthesized. */
+class WriteDefinition implements IAspect {
+  constructor(private readonly app: App, private readonly pipeline: Pipeline) {}
+
+  visit(node: IConstruct): void {
+    if (node === this.app) this.pipeline.writeDefinition();
+  }
+}
+
+/** A Foundry pipeline defined alongside the CDK stacks its stages deploy. */
+export class Pipeline extends Construct {
   public readonly pipelineName: string;
+  private readonly app: App;
+  private readonly fileName: string;
+  private readonly cdkOutPath: string;
+  private readonly trackedPackages: TrackedPackageDefinition[] = [];
   private readonly stages: PipelineStage[] = [];
-  private synthesizedDefinition: string | undefined;
 
   constructor(scope: Construct, id: string, props: PipelineProps = {}) {
-    super(scope, id, props);
+    super(scope, id);
+    const app = this.node.root;
+    if (!App.isApp(app)) throw new Error('A Pipeline must be created within a CDK App.');
+    this.app = app;
     this.pipelineName = props.pipelineName ?? id;
     requireLiteral(this.pipelineName, 'Pipeline name');
+    this.fileName = props.fileName ?? PIPELINE_FILE_NAME;
+    requireLiteral(this.fileName, 'Pipeline file name');
+    this.cdkOutPath = props.cdkOutPath ?? DEFAULT_CDK_OUT_PATH;
+    requireLiteral(this.cdkOutPath, 'Pipeline cdk.out path');
+    (props.trackedPackages ?? []).forEach(tracked => this.addTrackedPackage(tracked));
+    Aspects.of(app).add(new WriteDefinition(app, this));
   }
 
-  /** Absolute path to the pipeline JSON in this pipeline's CDK cloud assembly. */
-  get pipelineFile(): string { return join(this.outdir, 'pipeline.json'); }
+  /** Absolute path of the JSON this pipeline writes into the app's cloud assembly. */
+  get pipelineFile(): string { return join(this.app.outdir, this.fileName); }
 
-  addStage(id: string, props: DeploymentStageProps = {}): DeploymentStage {
-    this.checkStageId(id);
-    const stage = new DeploymentStage(this, id, props);
+  addTrackedPackage(props: TrackedPackageProps): this {
+    requireLiteral(props.repository, 'Tracked package repository');
+    requireLiteral(props.branch ?? 'main', 'Tracked package branch');
+    requireUnique(this.trackedPackages.map(tracked => tracked.repository), props.repository, 'tracked package');
+    this.trackedPackages.push({ repository: props.repository, branch: props.branch ?? 'main' });
+    return this;
+  }
+
+  addStage(id: string, props: PipelineStageProps = {}): PipelineStage {
+    requireLiteral(id, 'Stage ID');
+    const stage = new PipelineStage(this, id, props);
     this.stages.push(stage);
     return stage;
   }
 
-  addBuildStage(id: string, props: PipelineStageProps = {}): BuildStage {
-    this.checkStageId(id);
-    const stage = new BuildStage(this, id, props);
-    this.stages.push(stage);
-    return stage;
-  }
-
-  addDefinitionSyncStage(id: string, props: PipelineStageProps = {}): DefinitionSyncStage {
-    this.checkStageId(id);
-    const stage = new DefinitionSyncStage(this, id, props);
-    this.stages.push(stage);
-    return stage;
-  }
-
-  /** Returns a fresh stateless snapshot; does not write files or synthesize stacks. */
+  /** A fresh snapshot; writes nothing, so it is safe to inspect mid-configuration. */
   toDefinition(): PipelineDefinition {
-    if (!this.stages.length) throw new Error(`Pipeline ${this.pipelineName} requires at least one stage.`);
+    if (!this.trackedPackages.length) {
+      throw new Error(`Pipeline ${this.pipelineName} requires at least one tracked package.`);
+    }
+    const context: StepContext = {
+      trackedPackages: structuredClone(this.trackedPackages), cdkOutPath: this.cdkOutPath,
+    };
     return {
-      schemaVersion: 2, name: this.pipelineName, executionMode: PipelineExecutionMode.Sequential,
-      stages: this.stages.map((stage, index) => stage.toDefinition(this, index < this.stages.length - 1)),
+      schemaVersion: SCHEMA_VERSION,
+      build: { command: BUILD_COMMAND, trackedPackages: context.trackedPackages },
+      stages: this.stages.map(stage => stage.toDefinition(context)),
     };
   }
 
-  override synth(options: StageSynthesisOptions = {}): CloudAssembly {
-    // CDK invokes this public hook when synthesizing the parent App. Serialize
-    // after super.synth so resources added by aspects/preparation are included.
-    this.toDefinition();
-    const assembly = super.synth(options);
-    const json = `${JSON.stringify(this.toDefinition(), null, 2)}\n`;
-    if (!options.force && this.synthesizedDefinition !== undefined && this.synthesizedDefinition !== json) {
-      throw new Error('Pipeline definition changed after synthesis. Create a new App for a new synthesis.');
-    }
-    writeFileSync(this.pipelineFile, json, 'utf8');
-    this.synthesizedDefinition = json;
-    return assembly;
+  /** The `POST /pipelines` body: the definition plus the name it is created under. */
+  toCreateRequest(): CreatePipelineRequest {
+    return { pipelineName: this.pipelineName, definition: this.toDefinition() };
   }
 
-  private checkStageId(id: string): void {
-    requireLiteral(id, 'Stage ID');
-    requireUnique(this.stages.map(stage => stage.id), id, 'stage');
+  /** Called for you when the app synthesizes; returns the file it wrote. */
+  writeDefinition(): string {
+    this.checkFileIsUnclaimed();
+    writeFileSync(this.pipelineFile, `${JSON.stringify(this.toCreateRequest(), null, 2)}\n`, 'utf8');
+    return this.pipelineFile;
+  }
+
+  private checkFileIsUnclaimed(): void {
+    const clash = this.app.node.findAll()
+      .find(node => node !== this && node instanceof Pipeline && node.pipelineFile === this.pipelineFile);
+    if (clash) {
+      throw new Error(
+        `Pipelines ${this.node.path} and ${clash.node.path} both write ${this.fileName}; set a different fileName.`,
+      );
+    }
   }
 }
