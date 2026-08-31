@@ -5,7 +5,8 @@ import { Construct, type IConstruct } from 'constructs';
 import { PipelineStage, type PipelineStageProps } from './pipeline-stage';
 import {
   BUILD_COMMAND, SCHEMA_VERSION,
-  type CreatePipelineRequest, type PipelineDefinition, type TrackedPackageDefinition,
+  type CreatePipelineRequest, type PipelineDefinition, type SelfMutateDefinition,
+  type TrackedPackageDefinition,
 } from './schema';
 import type { StepContext } from './step';
 import { requireLiteral, requireUnique } from './validation';
@@ -31,6 +32,13 @@ export interface PipelineProps {
   readonly cdkOutPath?: string;
   /** Written into the app's `cdk.out`. @default 'pipeline.json' */
   readonly fileName?: string;
+  /**
+   * Whether every run re-reads this file and updates the stored pipeline from it, so a change
+   * to the pipeline ships like any other. @default true when exactly one package is tracked
+   */
+  readonly selfMutate?: boolean;
+  /** Which tracked package the build reads it from. @default the only tracked package */
+  readonly selfMutateSource?: string;
 }
 
 /** Writes the pipeline JSON once the app it belongs to is synthesized. */
@@ -48,6 +56,8 @@ export class Pipeline extends Construct {
   private readonly app: App;
   private readonly fileName: string;
   private readonly cdkOutPath: string;
+  private readonly selfMutate: boolean | undefined;
+  private readonly selfMutateSource: string | undefined;
   private readonly trackedPackages: TrackedPackageDefinition[] = [];
   private readonly stages: PipelineStage[] = [];
 
@@ -62,6 +72,9 @@ export class Pipeline extends Construct {
     requireLiteral(this.fileName, 'Pipeline file name');
     this.cdkOutPath = props.cdkOutPath ?? DEFAULT_CDK_OUT_PATH;
     requireLiteral(this.cdkOutPath, 'Pipeline cdk.out path');
+    this.selfMutate = props.selfMutate;
+    this.selfMutateSource = props.selfMutateSource;
+    if (this.selfMutateSource !== undefined) requireLiteral(this.selfMutateSource, 'Pipeline self-mutate source');
     (props.trackedPackages ?? []).forEach(tracked => this.addTrackedPackage(tracked));
     Aspects.of(app).add(new WriteDefinition(app, this));
   }
@@ -92,11 +105,31 @@ export class Pipeline extends Construct {
     const context: StepContext = {
       trackedPackages: structuredClone(this.trackedPackages), cdkOutPath: this.cdkOutPath,
     };
+    const selfMutate = this.selfMutateDefinition();
     return {
       schemaVersion: SCHEMA_VERSION,
       build: { command: BUILD_COMMAND, trackedPackages: context.trackedPackages },
       stages: this.stages.map(stage => stage.toDefinition(context)),
+      ...(selfMutate ? { selfMutate } : {}),
     };
+  }
+
+  /** The file this pipeline writes, as the runner sees it: repository-relative, inside the assembly. */
+  private selfMutateDefinition(): SelfMutateDefinition | undefined {
+    const repositories = this.trackedPackages.map(tracked => tracked.repository);
+    const [only] = repositories;
+    const source = this.selfMutateSource ?? (repositories.length === 1 ? only : undefined);
+    if (this.selfMutate === false) return undefined;
+    if (source === undefined) {
+      if (this.selfMutate !== true) return undefined;
+      throw new Error(
+        `Pipeline ${this.pipelineName} tracks ${repositories.length} packages, so selfMutateSource must name the one holding ${this.fileName}.`,
+      );
+    }
+    if (!repositories.includes(source)) {
+      throw new Error(`"${source}" is not one of the pipeline's tracked packages: ${repositories.join(', ') || 'none'}.`);
+    }
+    return { source, path: `${this.cdkOutPath}/${this.fileName}` };
   }
 
   /** The `POST /pipelines` body: the definition plus the name it is created under. */

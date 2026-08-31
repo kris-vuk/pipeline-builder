@@ -83,8 +83,41 @@ test('synth writes the POST /pipelines body with ordered stages and steps', t =>
           ],
         },
       ],
+      selfMutate: { source: REPOSITORY, path: `${CDK_OUT_PATH}/pipeline.json` },
     },
   });
+});
+
+test('self-mutation names the file the pipeline itself writes, and can be turned off', t => {
+  const off = setup(t, { selfMutate: false });
+  off.pipeline.addStage('sandbox').addStep(new BakeTimeStep({ durationMinutes: 1 }));
+  assert.equal(off.pipeline.toDefinition().selfMutate, undefined);
+
+  const renamed = setup(t, { fileName: 'delivery.json' });
+  renamed.pipeline.addStage('sandbox').addStep(new BakeTimeStep({ durationMinutes: 1 }));
+  assert.deepEqual(renamed.pipeline.toDefinition().selfMutate, {
+    source: REPOSITORY, path: `${CDK_OUT_PATH}/delivery.json`,
+  });
+});
+
+test('self-mutation needs a named source once more than one package is tracked', t => {
+  const { pipeline } = setup(t);
+  const other = 'https://github.com/kris-vuk/other-repo';
+  pipeline.addTrackedPackage({ repository: other });
+  pipeline.addStage('sandbox').addStep(new BakeTimeStep({ durationMinutes: 1 }));
+  assert.equal(pipeline.toDefinition().selfMutate, undefined);
+
+  const named = setup(t, { selfMutateSource: other, trackedPackages: [{ repository: REPOSITORY }, { repository: other }] });
+  named.pipeline.addStage('sandbox').addStep(new BakeTimeStep({ durationMinutes: 1 }));
+  assert.deepEqual(named.pipeline.toDefinition().selfMutate, { source: other, path: `${CDK_OUT_PATH}/pipeline.json` });
+
+  const asked = setup(t, { selfMutate: true, trackedPackages: [{ repository: REPOSITORY }, { repository: other }] });
+  asked.pipeline.addStage('sandbox').addStep(new BakeTimeStep({ durationMinutes: 1 }));
+  assert.throws(() => asked.pipeline.toDefinition(), /selfMutateSource must name the one holding pipeline.json/);
+
+  const untracked = setup(t, { selfMutateSource: 'https://github.com/kris-vuk/untracked' });
+  untracked.pipeline.addStage('sandbox').addStep(new BakeTimeStep({ durationMinutes: 1 }));
+  assert.throws(() => untracked.pipeline.toDefinition(), /not one of the pipeline's tracked packages/);
 });
 
 test('a step names the stack artifact cdk deploy selects, not its physical name', t => {
