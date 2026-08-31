@@ -71,10 +71,20 @@ export interface BuildDefinition {
   readonly trackedPackages: readonly TrackedPackageDefinition[];
 }
 
+/** Where a build finds the definition the pipeline re-reads itself from, so a run can update it. */
+export interface SelfMutateDefinition {
+  /** The tracked package holding it; matched against `build.trackedPackages`. */
+  readonly source: string;
+  /** Path to the synthesized `pipeline.json` within that repository. */
+  readonly path: string;
+}
+
 export interface PipelineDefinition {
   readonly schemaVersion: typeof SCHEMA_VERSION;
   readonly build: BuildDefinition;
   readonly stages: readonly StageDefinition[];
+  /** Absent on a pipeline that only ever changes through the API. */
+  readonly selfMutate?: SelfMutateDefinition;
 }
 
 /** The `POST /pipelines` body, which is what the synthesized `pipeline.json` holds. */
